@@ -114,7 +114,7 @@ python -m backend.telegram_bot
 ```
 
 #### New interactive UI
-- Inline buttons (Generate Card/BIN, Check BIN/Card, Live Status)
+- Inline buttons (Generate 10 Cards with country, Generate BIN, Check BIN/Card, Live Status)
 - Animated welcome GIF + emoji-rich responses
 - `/status` command shows live BIN count and readiness
 

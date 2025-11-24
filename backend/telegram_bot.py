@@ -15,7 +15,12 @@ import logging
 import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
 
 from dotenv import load_dotenv
 
@@ -53,9 +58,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "🤖 Welcome to Carding Tools V2 on Telegram!\n\n"
         "✨ Pick an action below or use the commands:"
     )
-    buttons = [
+    buttons = _build_main_buttons()
+
+    await update.message.reply_animation(
+        animation="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXc5bGM5emloM2VyYXNibDJlc3l2bTVhZGw3OXV4b3Zydm9nZmt4diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/j5QcmXoFWlDz13mRUu/giphy.gif",
+        caption=message,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+def _build_main_buttons() -> list[list[InlineKeyboardButton]]:
+    return [
         [
-            InlineKeyboardButton("⚡️ Generate Card", callback_data="TEMPLATE_GENERATE"),
+            InlineKeyboardButton("⚡️ Generate 10 Cards", callback_data="ACTION_GENERATE_CARDS"),
             InlineKeyboardButton("🎯 Generate BIN", callback_data="TEMPLATE_GENERATE_BIN"),
         ],
         [
@@ -65,11 +80,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("📊 Live Status", callback_data="SHOW_STATUS")],
     ]
 
-    await update.message.reply_animation(
-        animation="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXc5bGM5emloM2VyYXNibDJlc3l2bTVhZGw3OXV4b3Zydm9nZmt4diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/j5QcmXoFWlDz13mRUu/giphy.gif",
-        caption=message,
-        reply_markup=InlineKeyboardMarkup(buttons),
+
+def _format_cards_with_country(card_type: str = "visa", amount: int = 10) -> tuple[str, InlineKeyboardMarkup]:
+    bin_data = get_random_bin_from_database(card_type)
+    fallback_bin = generate_bin(card_type)
+
+    header_bin = bin_data["bin"] if bin_data else fallback_bin
+    header_country = bin_data["country"] if bin_data else "Unknown"
+    header_brand = bin_data["brand"] if bin_data else card_type.title()
+    header = (
+        "⚡️ Generated cards\n"
+        f"BIN: {header_bin}\n"
+        f"Brand: {header_brand}\n"
+        f"Country: {header_country}\n\n"
+        f"Showing {amount} cards (random month/year/CVV):"
     )
+
+    cards = [generate_card(header_bin) for _ in range(amount)]
+    body = "\n".join(f"{idx + 1}. {card}" for idx, card in enumerate(cards))
+
+    buttons = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Generate 10 more", callback_data="ACTION_GENERATE_CARDS")],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="SHOW_MENU"),
+                InlineKeyboardButton("📊 Status", callback_data="SHOW_STATUS"),
+            ],
+        ]
+    )
+
+    return f"{header}\n\n{body}", buttons
 
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -196,11 +236,20 @@ async def _send_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• 📱 Platform: Works on PC & Pterodactyl®"
     )
 
+    buttons = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⚡️ Generate 10 Cards", callback_data="ACTION_GENERATE_CARDS")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="SHOW_MENU")],
+        ]
+    )
+
     if update.callback_query:
         await update.callback_query.answer("Status refreshed ✨")
-        await update.callback_query.edit_message_text(status_message)
+        await update.callback_query.edit_message_text(
+            status_message, reply_markup=buttons
+        )
     else:
-        await update.message.reply_text(status_message)
+        await update.message.reply_text(status_message, reply_markup=buttons)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -222,7 +271,15 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "TEMPLATE_CHECK_CARD": "🛡️ Use /check <CARD|MM|YYYY|CVV> — example: /check 4242424242424242|12|2028|123",
     }
 
-    if data == "SHOW_STATUS":
+    if data == "ACTION_GENERATE_CARDS":
+        message, buttons = _format_cards_with_country()
+        await query.edit_message_text(message, reply_markup=buttons)
+    elif data == "SHOW_MENU":
+        await query.edit_message_text(
+            "🤖 Back to menu — pick an action:",
+            reply_markup=InlineKeyboardMarkup(_build_main_buttons()),
+        )
+    elif data == "SHOW_STATUS":
         await _send_status(update, context)
     elif data in templates:
         await query.edit_message_text(templates[data])
