@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Telegram Bot",
+            "type": "python",
+            "request": "launch",
+            "module": "backend.telegram_bot",
+            "console": "integratedTerminal",
+            "envFile": "${workspaceFolder}/.env"
+        }
+    ]
+}

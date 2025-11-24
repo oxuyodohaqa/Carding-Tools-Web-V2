@@ -113,6 +113,36 @@ export TELEGRAM_BOT_TOKEN="<your-bot-token>"
 python -m backend.telegram_bot
 ```
 
+#### Run from VS Code on your laptop
+
+1. Install [VS Code](https://code.visualstudio.com/) and the **Python** extension.
+2. Clone this repository and open the folder in VS Code.
+3. Copy the sample environment file and paste your bot token (for example the one you sent: `8482984175:AAFC-gyiLIB1gBnWwqYX1ix85BPIFXNfJM8`).
+
+   ```bash
+   cp .env.example .env
+   echo "TELEGRAM_BOT_TOKEN=8482984175:AAFC-gyiLIB1gBnWwqYX1ix85BPIFXNfJM8" > .env
+   ```
+
+4. Install the Python dependencies inside VS Code's terminal:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+5. Start the bot from VS Code using **Run and Debug ▸ Run Telegram Bot** (provided in `.vscode/launch.json`) or run it manually:
+
+   ```bash
+   python -m backend.telegram_bot
+   ```
+
+If you prefer Windows PowerShell, replace the `echo` command above with:
+
+```powershell
+Set-Content -Path .env -Value 'TELEGRAM_BOT_TOKEN=8482984175:AAFC-gyiLIB1gBnWwqYX1ix85BPIFXNfJM8'
+python -m backend.telegram_bot
+```
+
 ### Vercel Deployment
 1. Push to GitHub
 2. Import to Vercel

@@ -7,5 +7,6 @@ dependencies = [
     "aiohttp>=3.13.0",
     "fake-useragent>=2.2.0",
     "flask>=3.1.2",
+    "python-dotenv>=1.0.1",
     "python-telegram-bot>=21.7",
 ]
