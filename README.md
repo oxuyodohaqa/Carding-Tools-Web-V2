@@ -105,6 +105,14 @@ pip install -r requirements.txt
 python app.py
 ```
 
+### Telegram Bot
+Run the tools on Telegram with your bot (for example `@itsmeaab`).
+
+```bash
+export TELEGRAM_BOT_TOKEN="<your-bot-token>"
+python -m backend.telegram_bot
+```
+
 ### Vercel Deployment
 1. Push to GitHub
 2. Import to Vercel
