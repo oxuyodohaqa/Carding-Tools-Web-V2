@@ -7,6 +7,7 @@ import csv
 import base64
 import os
 from datetime import datetime
+import time
 from urllib.parse import urlencode
 from fake_useragent import UserAgent
 
@@ -673,17 +674,40 @@ def check_bin_route():
 def check_card():
     data = request.json
     card_data = data.get('card', '')
-    
+
     card = parse_card_input(card_data)
     if not card:
         return jsonify({'status': 'error', 'message': 'Invalid card format', 'card': card_data})
-    
+
+    start_time = time.perf_counter()
+    bin_number = card['cc'][:6]
+    bin_info = lookup_bin(bin_number) or {}
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     result = loop.run_until_complete(process_card({}, card))
     loop.close()
-    
-    return jsonify(result)
+
+    duration_ms = int((time.perf_counter() - start_time) * 1000)
+
+    enriched_result = {
+        **result,
+        'gateway': 'Stripe',
+        'bin': bin_number,
+        'brand': bin_info.get('brand', 'Unknown'),
+        'card_type': bin_info.get('type', 'Unknown'),
+        'bank': bin_info.get('issuer', 'Unknown'),
+        'country': bin_info.get('country', 'Unknown'),
+        'checked_at': datetime.utcnow().isoformat() + 'Z',
+        'duration_ms': duration_ms,
+        'card_info': {
+            'month': card.get('month', ''),
+            'year': card.get('year', ''),
+            'cvv': card.get('cvv', ''),
+        },
+    }
+
+    return jsonify(enriched_result)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
