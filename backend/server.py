@@ -256,15 +256,25 @@ def check_condition(source, comparison, value):
 
 def parse_card_input(card_input):
     try:
-        card_number, month, year, cvv = card_input.strip().split('|')
-        return {
-            'cc': card_number,
-            'month': month,
-            'year': year,
-            'cvv': cvv
-        }
+        card_number, month, year, cvv = [part.strip() for part in card_input.strip().split('|')]
     except ValueError:
         return None
+
+    if not card_number.isdigit():
+        return None
+
+    if not 13 <= len(card_number) <= 19:
+        return None
+
+    if luhn_checksum(card_number) != 0:
+        return None
+
+    return {
+        'cc': card_number,
+        'month': month,
+        'year': year,
+        'cvv': cvv
+    }
 
 async def process_card(data, card):
     data['input'] = card
