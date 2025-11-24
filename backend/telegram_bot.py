@@ -60,11 +60,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     buttons = _build_main_buttons()
 
+    # Send the animation first (no buttons) so the inline keyboard lives on a text message
+    # that can be edited safely by callbacks.
     await update.message.reply_animation(
         animation="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXc5bGM5emloM2VyYXNibDJlc3l2bTVhZGw3OXV4b3Zydm9nZmt4diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/j5QcmXoFWlDz13mRUu/giphy.gif",
         caption=message,
-        reply_markup=InlineKeyboardMarkup(buttons),
     )
+
+    # Place the inline buttons on a plain text message so Telegram can edit it when users
+    # tap the callbacks (avoids BadRequest: There is no text in the message).
+    await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 def _build_main_buttons() -> list[list[InlineKeyboardButton]]:
