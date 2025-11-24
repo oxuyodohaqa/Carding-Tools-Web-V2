@@ -475,6 +475,21 @@
             color: #fbbf24;
         }
 
+        .status-badge.secondary {
+            background: var(--bg-secondary);
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+
+        .card-meta {
+            margin-top: 8px;
+            color: var(--text-secondary);
+            font-size: 13px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
         .progress-bar {
             margin-top: 18px;
             height: 8px;
@@ -920,7 +935,21 @@
                 <textarea id="cardsInput" placeholder="4242424242424242|03|2029|123&#10;5555555555554444|12|2028|456"></textarea>
             </div>
 
-            <button id="checkBtn" onclick="checkCards()">Check Cards</button>
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center;">
+                <button id="checkBtn" onclick="checkCards()">Check Cards</button>
+                <button id="cleanBtn" onclick="cleanCardsInput()" class="secondary-btn">🧹 Clean List</button>
+            </div>
+
+            <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px;">
+                <input id="filterBin" class="input" placeholder="Filter by BIN" oninput="updateFilters()" />
+                <input id="filterCountry" class="input" placeholder="Filter by Country" oninput="updateFilters()" />
+                <input id="filterBank" class="input" placeholder="Filter by Bank" oninput="updateFilters()" />
+                <select id="filterType" class="input" onchange="updateFilters()">
+                    <option value="">Filter by Type</option>
+                    <option value="credit">Credit</option>
+                    <option value="debit">Debit</option>
+                </select>
+            </div>
 
             <div class="progress-bar" id="progressBar" style="display: none;">
                 <div class="progress-fill" id="progressFill"></div>
@@ -1028,6 +1057,8 @@
         let generatedBINsList = [];
         let checkedBINsSet = new Set();
         let totalDatabaseBINs = 0;
+        let checkerResultsData = [];
+        const checkerFilters = { bin: '', country: '', bank: '', type: '' };
 
         function toggleTheme() {
             document.body.classList.toggle('light-mode');
@@ -1323,9 +1354,104 @@
 
         let isChecking = false;
 
+        function cleanCardsInput() {
+            const input = document.getElementById('cardsInput');
+            const cleaned = Array.from(new Set(input.value
+                .split('\n')
+                .map(line => line.trim())
+                .filter(line => line !== '')));
+
+            input.value = cleaned.join('\n');
+        }
+
+        function updateFilters() {
+            checkerFilters.bin = document.getElementById('filterBin').value.trim().toLowerCase();
+            checkerFilters.country = document.getElementById('filterCountry').value.trim().toLowerCase();
+            checkerFilters.bank = document.getElementById('filterBank').value.trim().toLowerCase();
+            checkerFilters.type = document.getElementById('filterType').value.trim().toLowerCase();
+            renderResults();
+        }
+
+        function normalizeResult(result, fallbackCard) {
+            const message = (result.message && result.message.trim())
+                ? result.message
+                : "The card didn't go through stripe's server, Try again";
+
+            const cardInfo = result.card_info || {};
+            const cardNumber = result.card || fallbackCard || 'Unknown card';
+            const binNumber = result.bin || cardNumber.split('|')[0]?.slice(0, 6) || 'Unknown';
+
+            return {
+                ...result,
+                card: cardNumber,
+                message,
+                gateway: result.gateway || 'Stripe',
+                bin: binNumber,
+                brand: result.brand || 'Unknown',
+                card_type: result.card_type || 'Unknown',
+                bank: result.bank || 'Unknown',
+                country: result.country || 'Unknown',
+                duration_ms: result.duration_ms || null,
+                card_info: {
+                    month: cardInfo.month || '--',
+                    year: cardInfo.year || '--',
+                    cvv: cardInfo.cvv || '***'
+                }
+            };
+        }
+
+        function renderResults() {
+            const resultsDiv = document.getElementById('checkerResults');
+            resultsDiv.innerHTML = '';
+
+            const filtered = checkerResultsData.filter(result => {
+                const matchesBin = !checkerFilters.bin || (result.bin || '').toLowerCase().includes(checkerFilters.bin);
+                const matchesCountry = !checkerFilters.country || (result.country || '').toLowerCase().includes(checkerFilters.country);
+                const matchesBank = !checkerFilters.bank || (result.bank || '').toLowerCase().includes(checkerFilters.bank);
+                const matchesType = !checkerFilters.type || (result.card_type || '').toLowerCase().includes(checkerFilters.type);
+
+                return matchesBin && matchesCountry && matchesBank && matchesType;
+            });
+
+            filtered.forEach(result => {
+                resultsDiv.appendChild(renderResultCard(result));
+            });
+        }
+
+        function addResult(result) {
+            checkerResultsData.unshift(result);
+            renderResults();
+        }
+
+        function renderResultCard(result) {
+            const resultCard = document.createElement('div');
+            const statusClass = result.status ? result.status.toLowerCase() : 'unknown';
+            const statusText = result.status === 'SUCCESS' ? 'APPROVED' : result.status === 'FAIL' ? 'DECLINED' : (result.status || 'UNKNOWN');
+            const statusEmoji = result.status === 'SUCCESS' ? '✅' : result.status === 'FAIL' ? '❌' : '⚠️';
+            const durationText = result.duration_ms ? `${result.duration_ms}ms` : 'N/A';
+
+            resultCard.className = `card-result ${statusClass}`;
+            resultCard.innerHTML = `
+                <div class="card-number">${statusEmoji} ${result.card}</div>
+                <div class="card-status">
+                    <span class="status-badge ${statusClass}">${statusText}</span>
+                    <span class="status-badge secondary">🚪 ${result.gateway}</span>
+                </div>
+                <div class="card-meta">
+                    <div>💳 Exp: ${result.card_info.month}/${result.card_info.year} • CVV: ${result.card_info.cvv}</div>
+                    <div>🏦 Bank: ${result.bank} • BIN: ${result.bin} • Brand: ${result.brand}</div>
+                    <div>💠 Type: ${result.card_type}</div>
+                    <div>🌍 Country: ${result.country} • ⏱️ Time: ${durationText}</div>
+                    <div>📝 ${result.message}</div>
+                </div>
+            `;
+
+            return resultCard;
+        }
+
         async function checkCards() {
             if (isChecking) return;
-            
+
             const cardsInput = document.getElementById('cardsInput').value;
             const cards = cardsInput.split('\n').filter(line => line.trim() !== '');
             
@@ -1339,10 +1465,11 @@
             document.getElementById('checkBtn').innerHTML = 'Checking<span class="loading-spinner"></span>';
             document.getElementById('checkerResults').innerHTML = '';
             document.getElementById('progressBar').style.display = 'block';
-            
+            checkerResultsData = [];
+
             for (let i = 0; i < cards.length; i++) {
                 const card = cards[i].trim();
-                
+
                 const progress = ((i + 1) / cards.length) * 100;
                 document.getElementById('progressFill').style.width = progress + '%';
                 
@@ -1356,21 +1483,15 @@
                     });
 
                     const result = await response.json();
-                    
-                    if (!result.message || result.message.trim() === '') {
-                        result.message = "The card didn't go through stripe's server, Try again";
-                        result.status = 'UNKNOWN';
-                    }
-                    
-                    displayResult(result);
+                    addResult(normalizeResult(result, card));
                 } catch (error) {
-                    displayResult({
+                    addResult(normalizeResult({
                         card: card,
                         status: 'error',
                         message: 'Network error'
-                    });
+                    }, card));
                 }
-                
+
                 if (i < cards.length - 1) {
                     await countdown(7);
                 }
@@ -1381,25 +1502,6 @@
             document.getElementById('checkBtn').textContent = 'Check Cards';
             document.getElementById('progressBar').style.display = 'none';
             document.getElementById('countdown').style.display = 'none';
-        }
-
-        function displayResult(result) {
-            const resultsDiv = document.getElementById('checkerResults');
-            const resultCard = document.createElement('div');
-            resultCard.className = `card-result ${result.status.toLowerCase()}`;
-            
-            const statusClass = result.status.toLowerCase();
-            const statusText = result.status === 'SUCCESS' ? 'APPROVED' : result.status === 'FAIL' ? 'DECLINED' : result.status.toUpperCase();
-            
-            resultCard.innerHTML = `
-                <div class="card-number">${result.card}</div>
-                <div class="card-status">
-                    <span class="status-badge ${statusClass}">${statusText}</span>
-                    ${result.message}
-                </div>
-            `;
-            
-            resultsDiv.insertBefore(resultCard, resultsDiv.firstChild);
         }
 
         async function countdown(seconds) {

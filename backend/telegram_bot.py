@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -208,22 +209,45 @@ async def check_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     card_text = " ".join(context.args)
     card = parse_card_input(card_text)
     if not card:
-        await update.message.reply_text("Invalid format. Use CARD|MM|YYYY|CVV.")
+        await update.message.reply_text(
+            "Card number invalid — must be 13–19 digits and Luhn-valid"
+        )
         return
     waiting_message = await update.message.reply_text(
         "⏳ Checking card with Stripe..."
     )
 
+    start_time = time.perf_counter()
     result = await process_card({}, card)
+    duration_ms = int((time.perf_counter() - start_time) * 1000)
+    bin_number = result.get("bin") or card.get("cc", "")[:6]
+    bin_info = lookup_bin(bin_number) or {}
+    result.update({
+        "gateway": result.get("gateway", "Stripe"),
+        "bin": bin_number,
+        "bank": result.get("bank") or bin_info.get("issuer", "Unknown"),
+        "country": result.get("country") or bin_info.get("country", "Unknown"),
+        "brand": result.get("brand") or bin_info.get("brand", "Unknown"),
+        "card_type": result.get("card_type") or bin_info.get("type", "Unknown"),
+        "duration_ms": duration_ms,
+    })
     status = result.get("status", "UNKNOWN")
     message = result.get("message", "")
     response_excerpt = result.get("response", "")
+    status_emoji = "✅" if status.upper() == "SUCCESS" else "❌" if status.upper() == "FAIL" else "⚠️"
+    bank = result.get("bank", "Unknown")
+    country = result.get("country", "Unknown")
+    duration_ms = result.get("duration_ms")
+    duration_text = f"{duration_ms}ms" if duration_ms is not None else "N/A"
 
-    emoji = "✅" if status.upper() == "APPROVED" else "❌" if status.upper() == "DECLINED" else "⚠️"
     reply = (
-        f"{emoji} Card: {result.get('card', card_text)}\n"
-        f"Status: {status}\n"
-        f"Message: {message}\n"
+        f"{status_emoji} Status: {status}\n"
+        f"💳 Card: {result.get('card', card_text)}\n"
+        f"🏦 Bank: {bank} (BIN {bin_number})\n"
+        f"🌍 Country: {country}\n"
+        f"🚪 Gateway: {result.get('gateway', 'Stripe')}\n"
+        f"⏱️ Time: {duration_text}\n"
+        f"📝 Message: {message}\n"
     )
     if response_excerpt:
         reply += f"Response snippet: {response_excerpt[:200]}"
