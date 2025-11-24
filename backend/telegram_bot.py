@@ -208,7 +208,9 @@ async def check_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     card_text = " ".join(context.args)
     card = parse_card_input(card_text)
     if not card:
-        await update.message.reply_text("Invalid format. Use CARD|MM|YYYY|CVV.")
+        await update.message.reply_text(
+            "Card number invalid — must be 13–19 digits and Luhn-valid"
+        )
         return
     waiting_message = await update.message.reply_text(
         "⏳ Checking card with Stripe..."
