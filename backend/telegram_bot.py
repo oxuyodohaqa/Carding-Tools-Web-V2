@@ -15,6 +15,7 @@ import logging
 import os
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -250,9 +251,7 @@ async def _send_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if update.callback_query:
         await update.callback_query.answer("Status refreshed ✨")
-        await update.callback_query.edit_message_text(
-            status_message, reply_markup=buttons
-        )
+        await _edit_or_send(update.callback_query, status_message, buttons)
     else:
         await update.message.reply_text(status_message, reply_markup=buttons)
 
@@ -278,18 +277,49 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data == "ACTION_GENERATE_CARDS":
         message, buttons = _format_cards_with_country()
-        await query.edit_message_text(message, reply_markup=buttons)
+        await _edit_or_send(query, message, buttons)
     elif data == "SHOW_MENU":
-        await query.edit_message_text(
+        await _edit_or_send(
+            query,
             "🤖 Back to menu — pick an action:",
-            reply_markup=InlineKeyboardMarkup(_build_main_buttons()),
+            InlineKeyboardMarkup(_build_main_buttons()),
         )
     elif data == "SHOW_STATUS":
         await _send_status(update, context)
     elif data in templates:
-        await query.edit_message_text(templates[data])
+        await _edit_or_send(query, templates[data])
     else:
-        await query.edit_message_text("Use /help to see all commands.")
+        await _edit_or_send(query, "Use /help to see all commands.")
+
+
+async def _edit_or_send(
+    query, text: str, reply_markup: InlineKeyboardMarkup | None = None
+) -> None:
+    """Edit the callback message when possible, otherwise send a fresh reply.
+
+    Some Telegram callbacks can arrive on messages that only contain captions
+    (e.g., animations). Editing those messages triggers ``BadRequest: There is no
+    text in the message``. This helper edits text messages when available and
+    falls back to replying so inline buttons remain functional.
+    """
+
+    try:
+        if query.message and query.message.text:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+            return
+
+        # If the message is media-only (caption) or missing entirely, send a new reply
+        # to keep the user flow alive without raising BadRequest.
+        if query.message:
+            await query.message.reply_text(text, reply_markup=reply_markup)
+        else:
+            await query.from_user.send_message(text, reply_markup=reply_markup)
+    except BadRequest as exc:  # pragma: no cover - network-side safety net
+        logger.warning("Falling back to reply_text after BadRequest", exc_info=exc)
+        if query.message:
+            await query.message.reply_text(text, reply_markup=reply_markup)
+        else:
+            await query.from_user.send_message(text, reply_markup=reply_markup)
 
 
 def main() -> None:
