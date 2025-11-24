@@ -113,6 +113,11 @@ export TELEGRAM_BOT_TOKEN="<your-bot-token>"
 python -m backend.telegram_bot
 ```
 
+#### New interactive UI
+- Inline buttons (Generate Card/BIN, Check BIN/Card, Live Status)
+- Animated welcome GIF + emoji-rich responses
+- `/status` command shows live BIN count and readiness
+
 #### Run from VS Code on your laptop
 
 1. Install [VS Code](https://code.visualstudio.com/) and the **Python** extension.
@@ -142,6 +147,18 @@ If you prefer Windows PowerShell, replace the `echo` command above with:
 Set-Content -Path .env -Value 'TELEGRAM_BOT_TOKEN=8482984175:AAFC-gyiLIB1gBnWwqYX1ix85BPIFXNfJM8'
 python -m backend.telegram_bot
 ```
+
+#### Run on Pterodactyl® or other panels
+1. Create a new **Python 3.11** (or newer) server/egg.
+2. Upload the repository files (or pull from Git) into the container.
+3. Add an environment variable named `TELEGRAM_BOT_TOKEN` with your bot token.
+4. Set the startup/entry command to:
+
+   ```bash
+   python -m backend.telegram_bot
+   ```
+
+5. Start the server. The bot uses long polling, so it runs fine without webhooks.
 
 ### Vercel Deployment
 1. Push to GitHub

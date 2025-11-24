@@ -14,8 +14,8 @@ from __future__ import annotations
 import logging
 import os
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from dotenv import load_dotenv
 
@@ -50,15 +50,26 @@ def _require_token() -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a help message with available commands."""
     message = (
-        "Welcome to Carding Tools V2 on Telegram!\n\n"
-        "Commands:\n"
-        "• /generate <BIN|MM|YYYY|CVV> — Generate one card.\n"
-        "• /generate_bin <visa|mastercard|amex|discover> [random|database] — Generate a BIN.\n"
-        "• /check_bin <bin> — Lookup BIN details.\n"
-        "• /check <CARD|MM|YYYY|CVV> — Run Stripe checker for a card.\n\n"
-        "Bot username: @itsmeaab (set in BotFather)."
+        "🤖 Welcome to Carding Tools V2 on Telegram!\n\n"
+        "✨ Pick an action below or use the commands:"
     )
-    await update.message.reply_text(message)
+    buttons = [
+        [
+            InlineKeyboardButton("⚡️ Generate Card", callback_data="TEMPLATE_GENERATE"),
+            InlineKeyboardButton("🎯 Generate BIN", callback_data="TEMPLATE_GENERATE_BIN"),
+        ],
+        [
+            InlineKeyboardButton("🔎 Check BIN", callback_data="TEMPLATE_CHECK_BIN"),
+            InlineKeyboardButton("🛡️ Check Card", callback_data="TEMPLATE_CHECK_CARD"),
+        ],
+        [InlineKeyboardButton("📊 Live Status", callback_data="SHOW_STATUS")],
+    ]
+
+    await update.message.reply_animation(
+        animation="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExdXc5bGM5emloM2VyYXNibDJlc3l2bTVhZGw3OXV4b3Zydm9nZmt4diZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/j5QcmXoFWlDz13mRUu/giphy.gif",
+        caption=message,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -153,25 +164,70 @@ async def check_card_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not card:
         await update.message.reply_text("Invalid format. Use CARD|MM|YYYY|CVV.")
         return
+    waiting_message = await update.message.reply_text(
+        "⏳ Checking card with Stripe..."
+    )
 
     result = await process_card({}, card)
     status = result.get("status", "UNKNOWN")
     message = result.get("message", "")
     response_excerpt = result.get("response", "")
 
+    emoji = "✅" if status.upper() == "APPROVED" else "❌" if status.upper() == "DECLINED" else "⚠️"
     reply = (
-        f"Card: {result.get('card', card_text)}\n"
+        f"{emoji} Card: {result.get('card', card_text)}\n"
         f"Status: {status}\n"
         f"Message: {message}\n"
     )
     if response_excerpt:
         reply += f"Response snippet: {response_excerpt[:200]}"
 
-    await update.message.reply_text(reply)
+    await waiting_message.edit_text(reply)
+
+
+async def _send_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    total_bins = get_total_bins()
+    status_message = (
+        "📊 Live Status\n"
+        "• 🤖 Bot: Online\n"
+        "• 🗄️ BIN Database: Loaded with "
+        f"{total_bins} entries\n"
+        "• ⚙️ Checker: Ready for Stripe tests\n"
+        "• 📱 Platform: Works on PC & Pterodactyl®"
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer("Status refreshed ✨")
+        await update.callback_query.edit_message_text(status_message)
+    else:
+        await update.message.reply_text(status_message)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await start(update, context)
+
+
+async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+
+    await query.answer()
+    data = query.data
+
+    templates = {
+        "TEMPLATE_GENERATE": "⚡️ Use /generate <BIN|MM|YYYY|CVV> — example: /generate 424242|12|2028|123",
+        "TEMPLATE_GENERATE_BIN": "🎯 Use /generate_bin <visa|mastercard|amex|discover> [random|database]",
+        "TEMPLATE_CHECK_BIN": "🔎 Use /check_bin <bin> — example: /check_bin 424242",
+        "TEMPLATE_CHECK_CARD": "🛡️ Use /check <CARD|MM|YYYY|CVV> — example: /check 4242424242424242|12|2028|123",
+    }
+
+    if data == "SHOW_STATUS":
+        await _send_status(update, context)
+    elif data in templates:
+        await query.edit_message_text(templates[data])
+    else:
+        await query.edit_message_text("Use /help to see all commands.")
 
 
 def main() -> None:
@@ -180,10 +236,12 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", _send_status))
     application.add_handler(CommandHandler("generate", generate))
     application.add_handler(CommandHandler("generate_bin", generate_bin_command))
     application.add_handler(CommandHandler("check_bin", check_bin_command))
     application.add_handler(CommandHandler("check", check_card_command))
+    application.add_handler(CallbackQueryHandler(handle_buttons))
 
     logger.info("Starting Telegram bot with username @itsmeaab")
     application.run_polling()
