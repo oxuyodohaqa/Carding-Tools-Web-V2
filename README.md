@@ -160,6 +160,58 @@ python -m backend.telegram_bot
 
 5. Start the server. The bot uses long polling, so it runs fine without webhooks.
 
+### Configure multiple Telegram bots (plug + checker)
+The bot launcher supports running multiple bots (for example, a plug bot plus a checker bot) on a **single server process**. Choose either environment variables or a JSON file to register each bot’s token and admin.
+
+**Option 1 – Environment variables (recommended for Pterodactyl/single-file deploys)**
+```bash
+BOT_TOKENS="<plug_token>,<checker_token>" \
+BOT_ADMIN_IDS="<plug_admin_id>,<checker_admin_id>" \
+BOT_NAMES="plug_bot,checker_bot" \
+BOT_ROLES="plug,checker" \
+BOT_ALLOWED_IDS="<optional_plug_ids>|<more_ids>,<checker_allowed_id1>|<checker_allowed_id2>" \
+python bota.js
+```
+- Keep tokens, admin IDs, names, and roles in matching order.
+- Roles control features: `plug` disables Stripe on that bot, `checker` disables auto-plug, `both` (default) enables everything.
+- Bot names are optional; they default to `bot_1`, `bot_2`, etc.
+- `BOT_ALLOWED_IDS` is optional: put user IDs in the same order as `BOT_TOKENS`; separate multiple IDs for the same bot with `|` (admins always stay allowed).
+- Tokens without matching admin IDs are skipped.
+
+**Option 2 – Local config file**
+1. Copy the sample file and edit it:
+   ```bash
+   cp bots/bots_config.example.json bots/bots_config.json
+   ```
+2. Replace the placeholder tokens/admin IDs with your own values. Example format:
+ ```json
+ {
+   "bots": [
+      {
+        "bot_token": "111:AAA",
+        "admin_user_id": 12345,
+        "bot_name": "plug_bot",
+        "bot_role": "plug",
+        "enable_stripe_checker": false,
+        "allowed_user_ids": [11111, 22222]
+      },
+      {
+        "bot_token": "222:BBB",
+        "admin_user_id": 67890,
+        "bot_name": "checker_bot",
+        "bot_role": "checker",
+        "enable_autoplug": false,
+        "allowed_user_ids": [67890, 99999]
+      }
+    ]
+  }
+  ```
+3. Start `python bota.js`; it merges file entries with any env vars and keeps plug + checker tokens separate by admin. If you skip the role/flag fields, both auto-plug and Stripe stay enabled by default.
+
+> Access control: plug bots stay admin-only. Checker bots allow their admin plus any `allowed_user_ids` to run `/stripecheck` and `/gencards` (everyone else is blocked).
+
+> Tip: If you only need one bot, set a single token/admin via env vars or `bots_config.json` and start `python bota.js` as usual.
+
 ### Vercel Deployment
 1. Push to GitHub
 2. Import to Vercel
@@ -193,6 +245,10 @@ python -m backend.telegram_bot
 1. Enter BIN numbers (6 digits, one per line)
 2. Click "Check BINs"
 3. View detailed BIN information
+
+### Telegram checker bot commands
+- `/stripecheck <cards>` – paste cards (or upload a .txt) to check up to 100 at once.
+- `/gencards <bin> <amount>` – generate up to 100 Luhn-valid cards (bin optional; defaults to random).
 
 ## ⚠️ Disclaimer
 

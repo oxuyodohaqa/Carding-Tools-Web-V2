@@ -8,6 +8,7 @@ import json
 import os
 import hashlib
 import glob
+from pathlib import Path
 from datetime import datetime, timedelta
 import random
 from zoneinfo import ZoneInfo
@@ -16,6 +17,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, SessionRevokedError
 import logging
+import sys
+
+# Ensure local modules resolve when launched outside the repo root (e.g., Pterodactyl)
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.server import generate_card, parse_card_input, process_card
 
 from backend.server import parse_card_input, process_card
 
@@ -562,6 +571,57 @@ def get_admin_account(admin_id, bot_token):
     
     return admin_accounts[key]
 
+ROLE_FEATURES = {
+    'plug': (True, False),
+    'checker': (False, True),
+    'stripe': (False, True),
+    'both': (True, True),
+    'all': (True, True),
+}
+
+
+def _feature_flags(role: str | None, enable_autoplug=None, enable_stripe=None):
+    """Normalize bot feature flags from role/explicit booleans."""
+
+    normalized_role = (role or 'both').lower()
+    auto_default, stripe_default = ROLE_FEATURES.get(normalized_role, ROLE_FEATURES['both'])
+
+    # Explicit overrides win over role defaults
+    auto_flag = auto_default if enable_autoplug is None else bool(enable_autoplug)
+    stripe_flag = stripe_default if enable_stripe is None else bool(enable_stripe)
+
+    return {
+        'bot_role': normalized_role,
+        'enable_autoplug': auto_flag,
+        'enable_stripe_checker': stripe_flag,
+    }
+
+
+def _normalize_id_list(value):
+    """Return a list of int user IDs from a variety of inputs."""
+
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        raw_parts = value
+    else:
+        cleaned = str(value).replace(';', ',').replace('|', ',')
+        raw_parts = cleaned.split(',')
+
+    valid_ids = []
+    for part in raw_parts:
+        part = str(part).strip()
+        if not part:
+            continue
+        try:
+            valid_ids.append(int(part))
+        except ValueError:
+            logger.warning("Skipping invalid allowed user id: %s", part)
+
+    return valid_ids
+
+
 def _bots_from_env():
     """Read multi-bot config from environment (comma-separated)."""
     tokens = [t.strip() for t in os.getenv('BOT_TOKENS', '').split(',') if t.strip()]
@@ -570,6 +630,8 @@ def _bots_from_env():
 
     admins_raw = [a.strip() for a in os.getenv('BOT_ADMIN_IDS', '').split(',') if a.strip()]
     names_raw = [n.strip() for n in os.getenv('BOT_NAMES', '').split(',') if n.strip()]
+    roles_raw = [r.strip() for r in os.getenv('BOT_ROLES', '').split(',') if r.strip()]
+    allowed_raw = [a.strip() for a in os.getenv('BOT_ALLOWED_IDS', '').split(',')]
 
     bots = []
     for idx, token in enumerate(tokens):
@@ -583,12 +645,17 @@ def _bots_from_env():
             continue
 
         bot_name = names_raw[idx] if idx < len(names_raw) else f"bot_{idx + 1}"
+        role = roles_raw[idx] if idx < len(roles_raw) else 'both'
+        feature_flags = _feature_flags(role)
+        allowed_users = _normalize_id_list(allowed_raw[idx]) if idx < len(allowed_raw) else []
 
         bots.append({
             'bot_token': token,
             'admin_user_id': admin_id,
             'bot_name': bot_name,
-            'added': datetime.utcnow().isoformat()
+            'added': datetime.utcnow().isoformat(),
+            'allowed_user_ids': allowed_users,
+            **feature_flags,
         })
 
     if not bots:
@@ -626,11 +693,20 @@ def _bots_from_file():
             logger.warning("Skipping bot entry %s in config file: admin_user_id is not an integer", idx)
             continue
 
+        feature_flags = _feature_flags(
+            bot.get('bot_role') or bot.get('role'),
+            enable_autoplug=bot.get('enable_autoplug'),
+            enable_stripe=bot.get('enable_stripe_checker') if 'enable_stripe_checker' in bot else bot.get('enable_stripe'),
+        )
+        allowed_users = _normalize_id_list(bot.get('allowed_user_ids'))
+
         bots.append({
             'bot_token': token,
             'admin_user_id': admin_int,
             'bot_name': bot.get('bot_name', f"bot_{idx + 1}"),
-            'added': bot.get('added', datetime.utcnow().isoformat())
+            'added': bot.get('added', datetime.utcnow().isoformat()),
+            'allowed_user_ids': allowed_users,
+            **feature_flags,
         })
 
     return {'bots': bots}
@@ -679,6 +755,54 @@ def load_bots_config():
 
     return {'bots': bots}
 
+
+def _bot_features(bot_token):
+    """Return feature flags for a bot token (defaults to both enabled)."""
+
+    default_flags = {
+        'enable_autoplug': True,
+        'enable_stripe_checker': True,
+        'bot_role': 'both',
+    }
+
+    for bot in load_bots_config()['bots']:
+        if bot['bot_token'] == bot_token:
+            return {
+                'enable_autoplug': bot.get('enable_autoplug', True),
+                'enable_stripe_checker': bot.get('enable_stripe_checker', True),
+                'bot_role': bot.get('bot_role', bot.get('role', 'both')),
+            }
+
+    return default_flags
+
+
+def autoplug_enabled(bot_token):
+    return _bot_features(bot_token)['enable_autoplug']
+
+
+def stripe_enabled(bot_token):
+    return _bot_features(bot_token)['enable_stripe_checker']
+
+
+def _get_bot_entry(bot_token):
+    for bot in load_bots_config()['bots']:
+        if bot.get('bot_token') == bot_token:
+            return bot
+    return {}
+
+
+def allowed_users_for_bot(bot_token):
+    return _get_bot_entry(bot_token).get('allowed_user_ids', [])
+
+
+async def ensure_autoplug_enabled(update: Update, bot_token: str):
+    """Short-circuit auto-plug commands when a bot is checker-only."""
+    if autoplug_enabled(bot_token):
+        return True
+
+    await update.message.reply_text("⚠️ Auto-plug commands are disabled on this bot. Use your plug bot instead.")
+    return False
+
 def is_admin_for_bot(user_id, bot_token):
     """Check if user is admin for this bot"""
     config = load_bots_config()
@@ -686,6 +810,15 @@ def is_admin_for_bot(user_id, bot_token):
         if bot['bot_token'] == bot_token and bot['admin_user_id'] == user_id:
             return True
     return False
+
+
+def has_checker_access(user_id, bot_token):
+    """Admins or explicitly allowed users can run checker tools."""
+
+    if is_admin_for_bot(user_id, bot_token):
+        return True
+
+    return user_id in allowed_users_for_bot(bot_token)
 
 def get_admin_id_for_bot(bot_token):
     """Get admin ID for bot token"""
@@ -701,11 +834,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command - admin only"""
     user_id = update.effective_user.id
     bot_token = context.bot.token
-    
+
+    features = _bot_features(bot_token)
+    if not features['enable_autoplug']:
+        if not has_checker_access(user_id, bot_token):
+            await update.message.reply_text("❌ Access denied. Ask the bot owner to add you as an allowed checker user.")
+            return
+        await update.message.reply_text(
+            "🛡️ Stripe Checker Bot\n\n"
+            "This bot is configured for card and generator checks only.\n"
+            "• /stripecheck – paste or upload up to 100 cards\n"
+            "• /gencards <bin> <amount> – make Luhn-valid cards (max 100)"
+        )
+        return
+
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied. Admin only.")
         return
-    
+
     # Get user's Telegram username
     user = update.effective_user
     if user.username:
@@ -716,7 +862,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_display = "Admin"
     
     account = get_admin_account(user_id, bot_token)
-    
+
     if account.is_logged_in():
         # Already logged in - show main menu
         keyboard = [
@@ -724,10 +870,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📝 Messages", callback_data='messages')],
             [InlineKeyboardButton("🚀 Auto-Plug", callback_data='autoplug')]
         ]
-        
+
         session_user = account.config.get('username', 'Unknown')
-        
-        welcome_text = f"""🤖 Auto-Plug Bot 
+
+        stripe_line = ""
+        if features['enable_stripe_checker']:
+            stripe_line = (
+                "\n🛡️ Checker Tools:\n"
+                "• /stripecheck (paste or upload up to 100 cards)\n"
+                "• /gencards <bin> <amount> (generate up to 100)"
+            )
+
+        welcome_text = f"""🤖 Auto-Plug Bot
 
 Welcome back, {user_display}! 👋
 
@@ -736,7 +890,7 @@ Welcome back, {user_display}! 👋
 👥 Groups: {len(account.groups)}
 📝 Messages: {len(account.messages)}
 {'🟢 Auto-Plug: Running' if account.is_running else '🔴 Auto-Plug: Stopped'}
-🛡️ Stripe Checker: /stripecheck (paste or upload up to 100 cards)
+{stripe_line}
 
 Choose an option below:"""
     else:
@@ -745,8 +899,15 @@ Choose an option below:"""
             [InlineKeyboardButton("⚙️ Setup Account", callback_data='setup')],
             [InlineKeyboardButton("📊 Status", callback_data='status')]
         ]
-        
-        welcome_text = f"""🤖 Auto-Plug Bot 
+
+        stripe_line = ""
+        if features['enable_stripe_checker']:
+            stripe_line = (
+                "• Run /stripecheck to validate up to 100 cards at once\n"
+                "• Use /gencards <bin> <amount> to generate up to 100 cards"
+            )
+
+        welcome_text = f"""🤖 Auto-Plug Bot
 
 Welcome {user_display}! 👋
 
@@ -756,7 +917,7 @@ Click "Setup Account" to get started
 📝 **You'll need:**
 • API_ID & API_HASH from https://my.telegram.org
 • Your phone number
-• Run /stripecheck to validate up to 100 cards at once
+{stripe_line}
 
 After setup, you can auto-plug to all your groups!"""
 
@@ -770,6 +931,9 @@ async def setup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
+        return
+
+    if not await ensure_autoplug_enabled(update, bot_token):
         return
     
     help_text = """🔐 Setup Your Account
@@ -796,6 +960,9 @@ async def setcredentials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
+        return
+
+    if not await ensure_autoplug_enabled(update, bot_token):
         return
     
     if len(context.args) != 3:
@@ -828,7 +995,10 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if not account.is_configured():
@@ -850,11 +1020,14 @@ async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Verify code"""
     user_id = update.effective_user.id
     bot_token = context.bot.token
-    
+
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if len(context.args) != 1:
@@ -882,7 +1055,10 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if account.is_running:
@@ -909,7 +1085,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     keyboard = [
@@ -930,7 +1109,10 @@ async def addmessage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     context.user_data['waiting_for_message'] = True
     await update.message.reply_text("📝 Send the message to add:")
 
@@ -942,7 +1124,10 @@ async def listmessages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if not account.messages:
@@ -964,7 +1149,10 @@ async def removemessage(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
 
     if len(context.args) != 1:
@@ -990,7 +1178,10 @@ async def clearmessages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     count = len(account.messages)
     account.messages = []
@@ -1006,7 +1197,10 @@ async def setinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if len(context.args) != 1:
@@ -1035,7 +1229,10 @@ async def refreshgroups_command(update: Update, context: ContextTypes.DEFAULT_TY
     if not is_admin_for_bot(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
         return
-    
+
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
     await update.message.reply_text("🔄 Refreshing groups...")
     count, msg = await account.refresh_groups()
@@ -1126,6 +1323,9 @@ async def stopauto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Access denied")
         return
 
+    if not await ensure_autoplug_enabled(update, bot_token):
+        return
+
     account = get_admin_account(user_id, bot_token)
 
     if not account.is_running:
@@ -1147,8 +1347,12 @@ async def stripecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = update.effective_user.id
     bot_token = context.bot.token
 
-    if not is_admin_for_bot(user_id, bot_token):
+    if not has_checker_access(user_id, bot_token):
         await update.message.reply_text("❌ Access denied")
+        return
+
+    if not stripe_enabled(bot_token):
+        await update.message.reply_text("❌ Stripe checker is disabled on this bot. Use your checker bot instead.")
         return
 
     text_after_command = update.message.text.split(' ', 1)
@@ -1167,12 +1371,62 @@ async def stripecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 
+async def gencards_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate Luhn-valid cards for checker bots."""
+
+    user_id = update.effective_user.id
+    bot_token = context.bot.token
+
+    if not has_checker_access(user_id, bot_token):
+        await update.message.reply_text("❌ Access denied")
+        return
+
+    if not stripe_enabled(bot_token):
+        await update.message.reply_text("❌ Card generator is disabled on this bot. Use your checker bot instead.")
+        return
+
+    bin_prefix = ""
+    amount_arg = None
+
+    if context.args:
+        first = context.args[0]
+        if first.isdigit():
+            amount_arg = first
+        else:
+            bin_prefix = first
+    if len(context.args) > 1:
+        amount_arg = context.args[1]
+
+    try:
+        amount = int(amount_arg) if amount_arg is not None else 10
+    except ValueError:
+        await update.message.reply_text("❌ Amount must be a number (1-100)")
+        return
+
+    if amount < 1 or amount > 100:
+        await update.message.reply_text("❌ Amount must be between 1 and 100")
+        return
+
+    cards = [generate_card(bin_prefix) for _ in range(amount)]
+
+    header = f"🎴 Generated {amount} card(s)"
+    if bin_prefix:
+        header += f" with BIN prefix {bin_prefix}"
+
+    await update.message.reply_text(
+        f"{header}:\n\n" + "\n".join(cards)
+    )
+
+
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle uploaded documents for Stripe checks."""
     user_id = update.effective_user.id
     bot_token = context.bot.token
 
-    if not is_admin_for_bot(user_id, bot_token):
+    if not has_checker_access(user_id, bot_token):
+        return
+
+    if not stripe_enabled(bot_token):
         return
 
     if not context.user_data.get('awaiting_stripe_input'):
@@ -1195,14 +1449,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     bot_token = context.bot.token
 
-    if not is_admin_for_bot(user_id, bot_token):
-        return
-
     if context.user_data.get('awaiting_stripe_input'):
+        if not has_checker_access(user_id, bot_token):
+            context.user_data['awaiting_stripe_input'] = False
+            await update.message.reply_text("❌ Access denied. Ask the bot owner to add you.")
+            return
+        if not stripe_enabled(bot_token):
+            context.user_data['awaiting_stripe_input'] = False
+            await update.message.reply_text("❌ Stripe checker is disabled on this bot. Use your checker bot instead.")
+            return
         await _run_stripe_from_text(update, context, update.message.text)
         return
 
+    if not is_admin_for_bot(user_id, bot_token):
+        return
+
     if context.user_data.get('waiting_for_message'):
+        if not autoplug_enabled(bot_token):
+            context.user_data['waiting_for_message'] = False
+            return
         account = get_admin_account(user_id, bot_token)
         message_text = update.message.text
         
@@ -1234,11 +1499,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     bot_token = context.bot.token
-    
+
     if not is_admin_for_bot(user_id, bot_token):
         await query.message.reply_text("❌ Access denied")
         return
-    
+
+    if not autoplug_enabled(bot_token):
+        await query.message.reply_text("⚠️ Auto-plug buttons are disabled on this bot. Use your plug bot instead.")
+        return
+
     account = get_admin_account(user_id, bot_token)
     
     if query.data == 'setup':
@@ -1424,6 +1693,7 @@ def create_bot_application(token):
     app.add_handler(CommandHandler("clearmessages", clearmessages))
     app.add_handler(CommandHandler("setinterval", setinterval))
     app.add_handler(CommandHandler("stripecheck", stripecheck_command))
+    app.add_handler(CommandHandler("gencards", gencards_command))
     app.add_handler(CommandHandler("refreshgroups", refreshgroups_command))
     app.add_handler(CommandHandler("plugnow", plugnow_command))
     app.add_handler(CommandHandler("startauto", startauto_command))
