@@ -5,14 +5,16 @@
       "admin_user_id": 1234567890,
       "bot_name": "plug_bot",
       "bot_role": "plug",
-      "enable_stripe_checker": false
+      "enable_stripe_checker": false,
+      "allowed_user_ids": [1234567890]
     },
     {
       "bot_token": "2222222222:BBB-example-checker-token",
       "admin_user_id": 9876543210,
       "bot_name": "checker_bot",
       "bot_role": "checker",
-      "enable_autoplug": false
+      "enable_autoplug": false,
+      "allowed_user_ids": [9876543210, 1111111111]
     }
   ]
 }
