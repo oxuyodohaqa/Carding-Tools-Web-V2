@@ -168,9 +168,11 @@ The bot launcher supports running multiple bots (for example, a plug bot plus a 
 BOT_TOKENS="<plug_token>,<checker_token>" \
 BOT_ADMIN_IDS="<plug_admin_id>,<checker_admin_id>" \
 BOT_NAMES="plug_bot,checker_bot" \
+BOT_ROLES="plug,checker" \
 python bota.js
 ```
-- Keep tokens and admin IDs in matching order.
+- Keep tokens, admin IDs, names, and roles in matching order.
+- Roles control features: `plug` disables Stripe on that bot, `checker` disables auto-plug, `both` (default) enables everything.
 - Bot names are optional; they default to `bot_1`, `bot_2`, etc.
 - Tokens without matching admin IDs are skipped.
 
@@ -180,15 +182,27 @@ python bota.js
    cp bots/bots_config.example.json bots/bots_config.json
    ```
 2. Replace the placeholder tokens/admin IDs with your own values. Example format:
-   ```json
-   {
-     "bots": [
-       { "bot_token": "111:AAA", "admin_user_id": 12345, "bot_name": "plug_bot" },
-       { "bot_token": "222:BBB", "admin_user_id": 67890, "bot_name": "checker_bot" }
-     ]
-   }
-   ```
-3. Start `python bota.js`; it merges file entries with any env vars and keeps plug + checker tokens separate by admin.
+ ```json
+ {
+   "bots": [
+      {
+        "bot_token": "111:AAA",
+        "admin_user_id": 12345,
+        "bot_name": "plug_bot",
+        "bot_role": "plug",
+        "enable_stripe_checker": false
+      },
+      {
+        "bot_token": "222:BBB",
+        "admin_user_id": 67890,
+        "bot_name": "checker_bot",
+        "bot_role": "checker",
+        "enable_autoplug": false
+      }
+    ]
+  }
+  ```
+3. Start `python bota.js`; it merges file entries with any env vars and keeps plug + checker tokens separate by admin. If you skip the role/flag fields, both auto-plug and Stripe stay enabled by default.
 
 > Tip: If you only need one bot, set a single token/admin via env vars or `bots_config.json` and start `python bota.js` as usual.
 
