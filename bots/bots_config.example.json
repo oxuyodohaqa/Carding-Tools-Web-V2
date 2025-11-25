@@ -1,0 +1,14 @@
+{
+  "bots": [
+    {
+      "bot_token": "1111111111:AAA-example-plug-token",
+      "admin_user_id": 1234567890,
+      "bot_name": "plug_bot"
+    },
+    {
+      "bot_token": "2222222222:BBB-example-checker-token",
+      "admin_user_id": 9876543210,
+      "bot_name": "checker_bot"
+    }
+  ]
+}
