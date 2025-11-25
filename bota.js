@@ -17,6 +17,8 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, FloodWaitError, SessionRevokedError
 import logging
 
+from backend.server import parse_card_input, process_card
+
 # Disable third-party logs
 logging.getLogger('httpx').setLevel(logging.ERROR)
 logging.getLogger('telegram').setLevel(logging.ERROR)
@@ -60,6 +62,80 @@ class RateLimiter:
 
 # Global rate limiter - LIMIT CONCURRENT SESSIONS
 global_rate_limiter = RateLimiter(max_concurrent=8, delay_between=1)
+
+
+class StripeBatchChecker:
+    """Simple Stripe checker that processes up to max_cards sequentially."""
+
+    def __init__(self, delay_seconds: int = 6, max_cards: int = 100):
+        self.delay_seconds = delay_seconds
+        self.max_cards = max_cards
+
+    def _parse_cards(self, raw_input: str):
+        lines = [line.strip() for line in raw_input.replace('\r', '\n').split('\n')]
+        return [line for line in lines if line]
+
+    async def run_checks(self, raw_input: str, bot: Bot, chat_id: int):
+        cards = self._parse_cards(raw_input)
+
+        if not cards:
+            await bot.send_message(chat_id=chat_id, text="❌ No cards found. Send them as CARD|MM|YYYY|CVV (one per line).")
+            return
+
+        if len(cards) > self.max_cards:
+            await bot.send_message(chat_id=chat_id, text=f"⚠️ Limiting to first {self.max_cards} cards (received {len(cards)}).")
+            cards = cards[: self.max_cards]
+
+        await bot.send_message(chat_id=chat_id, text=f"🛡️ Starting Stripe check for {len(cards)} card(s). Processing line by line...")
+
+        success = 0
+        failed = 0
+        unknown = 0
+        invalid = 0
+
+        for idx, line in enumerate(cards, start=1):
+            parsed = parse_card_input(line)
+            if not parsed:
+                invalid += 1
+                await bot.send_message(chat_id=chat_id, text=f"#{idx}: ❌ Invalid format -> {line}")
+                continue
+
+            try:
+                result = await process_card({}, parsed)
+                status = result.get('status', 'UNKNOWN')
+                message = result.get('message', 'No response')
+                card_display = result.get('card', line)
+
+                if status == 'SUCCESS':
+                    success += 1
+                    emoji = '✅'
+                elif status == 'FAIL':
+                    failed += 1
+                    emoji = '❌'
+                else:
+                    unknown += 1
+                    emoji = '⚠️'
+
+                await bot.send_message(chat_id=chat_id, text=f"#{idx}: {emoji} {card_display} — {message}")
+            except Exception as exc:  # noqa: BLE001 - bubble up to the user
+                unknown += 1
+                await bot.send_message(chat_id=chat_id, text=f"#{idx}: ⚠️ Error checking card: {exc}")
+
+            if idx < len(cards):
+                await asyncio.sleep(self.delay_seconds)
+
+        summary = (
+            "📊 Stripe Check Complete\n\n"
+            f"✅ Approved: {success}\n"
+            f"❌ Declined: {failed}\n"
+            f"⚠️ Unknown/Error: {unknown}\n"
+            f"🚫 Invalid Format: {invalid}\n"
+            f"Total Processed: {len(cards)}"
+        )
+        await bot.send_message(chat_id=chat_id, text=summary)
+
+
+stripe_checker = StripeBatchChecker()
 
 class AdminAccount:
     """Admin's Telegram account for auto-plugging - FIXED SESSION MANAGEMENT"""
@@ -486,16 +562,90 @@ def get_admin_account(admin_id, bot_token):
     
     return admin_accounts[key]
 
-def load_bots_config():
-    """Load bot configurations"""
-    if os.path.exists(BOTS_CONFIG):
+def _bots_from_env():
+    """Read multi-bot config from environment (comma-separated)."""
+    tokens = [t.strip() for t in os.getenv('BOT_TOKENS', '').split(',') if t.strip()]
+    if not tokens:
+        return None
+
+    admins_raw = [a.strip() for a in os.getenv('BOT_ADMIN_IDS', '').split(',') if a.strip()]
+    names_raw = [n.strip() for n in os.getenv('BOT_NAMES', '').split(',') if n.strip()]
+
+    bots = []
+    for idx, token in enumerate(tokens):
         try:
-            with open(BOTS_CONFIG, 'r') as f:
-                return json.load(f)
-        except:
-            return {'bots': []}
+            admin_id = int(admins_raw[idx])
+        except (IndexError, ValueError):
+            logger.warning(
+                "Skipping bot token at index %s because BOT_ADMIN_IDS is missing or invalid for it",
+                idx,
+            )
+            continue
+
+        bot_name = names_raw[idx] if idx < len(names_raw) else f"bot_{idx + 1}"
+
+        bots.append({
+            'bot_token': token,
+            'admin_user_id': admin_id,
+            'bot_name': bot_name,
+            'added': datetime.utcnow().isoformat()
+        })
+
+    if not bots:
+        logger.warning("No valid bots loaded from environment; falling back to config file")
+        return None
+
+    logger.info(f"Loaded {len(bots)} bot(s) from environment BOT_TOKENS with unique admins")
+    return {'bots': bots}
+
+
+def _bots_from_file():
+    """Load bot config from bots_config.json while ensuring per-bot admin mapping."""
+    if not os.path.exists(BOTS_CONFIG):
+        return None
+
+    try:
+        with open(BOTS_CONFIG, 'r') as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.error(f"Failed to read {BOTS_CONFIG}: {exc}")
+        return {'bots': []}
+
+    bots = []
+    for idx, bot in enumerate(data.get('bots', [])):
+        token = bot.get('bot_token', '').strip()
+        admin_id = bot.get('admin_user_id')
+
+        if not token or admin_id is None:
+            logger.warning("Skipping bot entry %s in config file: missing token or admin_user_id", idx)
+            continue
+
+        try:
+            admin_int = int(admin_id)
+        except Exception:
+            logger.warning("Skipping bot entry %s in config file: admin_user_id is not an integer", idx)
+            continue
+
+        bots.append({
+            'bot_token': token,
+            'admin_user_id': admin_int,
+            'bot_name': bot.get('bot_name', f"bot_{idx + 1}"),
+            'added': bot.get('added', datetime.utcnow().isoformat())
+        })
+
+    return {'bots': bots}
+
+
+def load_bots_config():
+    """Load bot configurations (file/default) and merge optional env additions."""
+    bots = []
+    source = 'default'
+
+    file_config = _bots_from_file()
+    if file_config is not None:
+        bots.extend(file_config.get('bots', []))
+        source = 'config file'
     else:
-        # Create default config
         default = {
             'bots': [
                 {
@@ -506,12 +656,28 @@ def load_bots_config():
                 }
             ]
         }
+        bots.extend(default['bots'])
         try:
+            os.makedirs(BOTS_DIR, exist_ok=True)
             with open(BOTS_CONFIG, 'w') as f:
                 json.dump(default, f, indent=2)
-        except:
-            pass
-        return default
+        except Exception as exc:
+            logger.error(f"Failed to create default bots config: {exc}")
+
+    env_config = _bots_from_env()
+    if env_config:
+        existing_tokens = {bot['bot_token'] for bot in bots}
+        added = 0
+        for bot in env_config.get('bots', []):
+            if bot['bot_token'] in existing_tokens:
+                logger.info("Skipping env bot token already present in file/default config")
+                continue
+            bots.append(bot)
+            added += 1
+        if added:
+            logger.info(f"Merged {added} bot(s) from environment with {source} bots")
+
+    return {'bots': bots}
 
 def is_admin_for_bot(user_id, bot_token):
     """Check if user is admin for this bot"""
@@ -570,6 +736,7 @@ Welcome back, {user_display}! 👋
 👥 Groups: {len(account.groups)}
 📝 Messages: {len(account.messages)}
 {'🟢 Auto-Plug: Running' if account.is_running else '🔴 Auto-Plug: Stopped'}
+🛡️ Stripe Checker: /stripecheck (paste or upload up to 100 cards)
 
 Choose an option below:"""
     else:
@@ -589,9 +756,10 @@ Click "Setup Account" to get started
 📝 **You'll need:**
 • API_ID & API_HASH from https://my.telegram.org
 • Your phone number
+• Run /stripecheck to validate up to 100 cards at once
 
 After setup, you can auto-plug to all your groups!"""
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
@@ -967,14 +1135,73 @@ async def stopauto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     account.set_auto_plug_running(False)
     await update.message.reply_text("✅ Auto-Plug Stopped!")
 
+
+async def _run_stripe_from_text(update: Update, context: ContextTypes.DEFAULT_TYPE, raw_text: str):
+    """Helper to trigger Stripe checks from text or file content."""
+    context.user_data['awaiting_stripe_input'] = False
+    await stripe_checker.run_checks(raw_text, context.bot, update.effective_chat.id)
+
+
+async def stripecheck_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start Stripe check for a block of cards (up to 100)."""
+    user_id = update.effective_user.id
+    bot_token = context.bot.token
+
+    if not is_admin_for_bot(user_id, bot_token):
+        await update.message.reply_text("❌ Access denied")
+        return
+
+    text_after_command = update.message.text.split(' ', 1)
+    card_block = text_after_command[1].strip() if len(text_after_command) > 1 else ""
+
+    if card_block:
+        await _run_stripe_from_text(update, context, card_block)
+        return
+
+    context.user_data['awaiting_stripe_input'] = True
+    await update.message.reply_text(
+        "🛡️ Send cards to check with Stripe.\n\n"
+        "• Format: CARD|MM|YYYY|CVV\n"
+        "• Up to 100 lines per run\n"
+        "• You can paste text or upload a .txt file"
+    )
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle uploaded documents for Stripe checks."""
+    user_id = update.effective_user.id
+    bot_token = context.bot.token
+
+    if not is_admin_for_bot(user_id, bot_token):
+        return
+
+    if not context.user_data.get('awaiting_stripe_input'):
+        return
+
+    document = update.message.document
+    try:
+        file = await document.get_file()
+        content = await file.download_as_bytearray()
+        text = content.decode('utf-8', errors='ignore')
+    except Exception as exc:  # noqa: BLE001
+        await update.message.reply_text(f"❌ Couldn't read file: {exc}")
+        context.user_data['awaiting_stripe_input'] = False
+        return
+
+    await _run_stripe_from_text(update, context, text)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle text messages"""
     user_id = update.effective_user.id
     bot_token = context.bot.token
-    
+
     if not is_admin_for_bot(user_id, bot_token):
         return
-    
+
+    if context.user_data.get('awaiting_stripe_input'):
+        await _run_stripe_from_text(update, context, update.message.text)
+        return
+
     if context.user_data.get('waiting_for_message'):
         account = get_admin_account(user_id, bot_token)
         message_text = update.message.text
@@ -1196,13 +1423,15 @@ def create_bot_application(token):
     app.add_handler(CommandHandler("removemessage", removemessage))
     app.add_handler(CommandHandler("clearmessages", clearmessages))
     app.add_handler(CommandHandler("setinterval", setinterval))
+    app.add_handler(CommandHandler("stripecheck", stripecheck_command))
     app.add_handler(CommandHandler("refreshgroups", refreshgroups_command))
     app.add_handler(CommandHandler("plugnow", plugnow_command))
     app.add_handler(CommandHandler("startauto", startauto_command))
     app.add_handler(CommandHandler("stopauto", stopauto_command))
     app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
+
     return app
 
 async def restart_auto_plugs():
