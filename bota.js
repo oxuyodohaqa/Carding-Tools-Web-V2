@@ -26,6 +26,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from backend.server import generate_card, parse_card_input, process_card
 
+from backend.server import parse_card_input, process_card
+
 # Disable third-party logs
 logging.getLogger('httpx').setLevel(logging.ERROR)
 logging.getLogger('telegram').setLevel(logging.ERROR)
